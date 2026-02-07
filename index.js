@@ -7,6 +7,7 @@ import { exec } from 'child_process';
 import { promisify } from 'util';
 import fs from 'fs/promises';
 import path from 'path';
+import os from 'os';
 import sharp from 'sharp';
 
 const execAsync = promisify(exec);
@@ -14,7 +15,7 @@ const execAsync = promisify(exec);
 const server = new Server(
   {
     name: 'wslsnapit-server',
-    version: '2.2.0',
+    version: '2.3.0',
   },
   {
     capabilities: {
@@ -28,7 +29,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
     tools: [
       {
         name: 'take_screenshot',
-        description: 'WSLSnapIt: Smart screenshot capture for WSL. Capture monitors, windows by title/process, with direct image return and auto-compression.',
+        description: 'WSLSnapIt: Smart screenshot capture for WSL. Capture monitors, windows by title/process. Supports background window capture (no need to bring window to foreground) using PrintWindow API. Direct image return with auto-compression.',
         inputSchema: {
           type: 'object',
           properties: {
@@ -71,6 +72,11 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
               default: 80,
               minimum: 1,
               maximum: 100
+            },
+            background: {
+              type: 'boolean',
+              description: 'If true (default), captures the window in the background using PrintWindow API without bringing it to the foreground. Set to false to use legacy foreground capture. Only applies to window captures (windowTitle/processName).',
+              default: true
             }
           }
         }
@@ -99,15 +105,16 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
   const { name, arguments: args } = request.params;
   
   if (name === 'take_screenshot') {
-    const { 
-      filename = 'screenshot.png', 
-      monitor = 'all', 
-      windowTitle, 
+    const {
+      filename = 'screenshot.png',
+      monitor = 'all',
+      windowTitle,
       windowIndex = 1,
       processName,
       folder,
       returnDirect = true,
-      quality = 80
+      quality = 80,
+      background = true
     } = args;
     
     // Check if windowIndex was explicitly provided (not just the default)
@@ -175,6 +182,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       if (windowTitle || processName) {
         // Convert boolean to PowerShell boolean string
         const psWindowIndexProvided = windowIndexProvided ? '$true' : '$false';
+        const psBackground = (background !== false) ? '$true' : '$false';
         
         // Escape variables to prevent injection
         const escapedWindowTitle = (windowTitle || '').replace(/"/g, '""');
@@ -202,7 +210,16 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
               
               [DllImport("user32.dll")]
               public static extern bool SetForegroundWindow(IntPtr hWnd);
-              
+
+              [DllImport("user32.dll")]
+              public static extern bool PrintWindow(IntPtr hWnd, IntPtr hdcBlt, uint nFlags);
+
+              [DllImport("user32.dll")]
+              public static extern bool IsIconic(IntPtr hWnd);
+
+              [DllImport("user32.dll")]
+              public static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
+
               public struct RECT {
                 public int Left;
                 public int Top;
@@ -379,14 +396,47 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           $width = $rect.Right - $rect.Left
           $height = $rect.Bottom - $rect.Top
           
-          # Bring window to foreground and wait for it to fully render
-          [Win32]::SetForegroundWindow($hwnd) | Out-Null
-          Start-Sleep -Milliseconds 200
-          
-          # Capture the window with DPI awareness
+          $bgCapture = ${psBackground}
+          $isMinimized = [Win32]::IsIconic($hwnd)
+
           $bitmap = New-Object System.Drawing.Bitmap $width, $height
           $graphics = [System.Drawing.Graphics]::FromImage($bitmap)
-          $graphics.CopyFromScreen($rect.Left, $rect.Top, 0, 0, $bitmap.Size)
+
+          if ($bgCapture -and (-not $isMinimized)) {
+            # Background capture using PrintWindow API (like OBS Studio)
+            # Captures window content without bringing it to the foreground
+            $hdc = $graphics.GetHdc()
+            $success = [Win32]::PrintWindow($hwnd, $hdc, 2)  # PW_RENDERFULLCONTENT
+            $graphics.ReleaseHdc($hdc)
+            if (-not $success) {
+              # Fallback to foreground capture if PrintWindow fails
+              $graphics.Dispose()
+              $bitmap.Dispose()
+              $bitmap = New-Object System.Drawing.Bitmap $width, $height
+              $graphics = [System.Drawing.Graphics]::FromImage($bitmap)
+              [Win32]::SetForegroundWindow($hwnd) | Out-Null
+              Start-Sleep -Milliseconds 200
+              $graphics.CopyFromScreen($rect.Left, $rect.Top, 0, 0, $bitmap.Size)
+            }
+          } else {
+            # Foreground capture (legacy method or window is minimized)
+            if ($isMinimized) {
+              [Win32]::ShowWindow($hwnd, 9) | Out-Null  # SW_RESTORE
+              Start-Sleep -Milliseconds 300
+              # Recalculate rect after restore
+              [Win32]::GetWindowRect($hwnd, [ref]$rect) | Out-Null
+              $width = $rect.Right - $rect.Left
+              $height = $rect.Bottom - $rect.Top
+              $graphics.Dispose()
+              $bitmap.Dispose()
+              $bitmap = New-Object System.Drawing.Bitmap $width, $height
+              $graphics = [System.Drawing.Graphics]::FromImage($bitmap)
+            } else {
+              [Win32]::SetForegroundWindow($hwnd) | Out-Null
+              Start-Sleep -Milliseconds 200
+            }
+            $graphics.CopyFromScreen($rect.Left, $rect.Top, 0, 0, $bitmap.Size)
+          }
           
           ${captureCode}
           } catch {
@@ -483,16 +533,17 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         `;
       }
       
-      // Convert to base64 to avoid escaping issues
-      const encodedCommand = Buffer.from(psScript, 'utf16le').toString('base64');
-      
-      // Execute PowerShell with encoded command (suppress CLIXML output)
+      // Write script to temp file to avoid command line length limits
+      const tempScript = path.join(os.tmpdir(), `wslsnapit_${Date.now()}.ps1`);
+      await fs.writeFile(tempScript, psScript, 'utf8');
+
+      // Execute PowerShell script from temp file
       let stdout = '';
       let stderr = '';
-      
+
       try {
         const result = await execAsync(
-          `powershell.exe -ExecutionPolicy Bypass -NoProfile -NonInteractive -OutputFormat Text -EncodedCommand ${encodedCommand}`,
+          `powershell.exe -ExecutionPolicy Bypass -NoProfile -NonInteractive -OutputFormat Text -File "${tempScript}"`,
           { maxBuffer: 50 * 1024 * 1024 } // Increase buffer for large PNG images
         );
         stdout = result.stdout;
@@ -501,6 +552,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         // PowerShell failed, but we still want to check stdout for our custom error messages
         stdout = error.stdout || '';
         stderr = error.stderr || '';
+      } finally {
+        // Clean up temp file
+        await fs.unlink(tempScript).catch(() => {});
       }
       
       // Check for our custom error messages in both stdout and stderr

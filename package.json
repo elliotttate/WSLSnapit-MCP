@@ -19,8 +19,9 @@
   "author": "WSLSnapit Developer",
   "license": "MIT",
   "dependencies": {
+    "@img/sharp-win32-x64": "^0.34.5",
     "@modelcontextprotocol/sdk": "^0.6.0",
-    "sharp": "^0.34.2"
+    "sharp": "^0.34.5"
   },
   "engines": {
     "node": ">=18.0.0"
