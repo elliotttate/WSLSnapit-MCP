@@ -189,7 +189,7 @@ WSLSnapit-MCP is designed with security in mind:
 ### Common Issues
 
 1. **"No windows found" error**
-   - Ensure the target window is visible and not minimized
+   - For `background: true`, minimized windows are captured via `PrintWindow` when supported by the target app
    - Try using a shorter or different part of the window title
    - Use process name instead of window title
 

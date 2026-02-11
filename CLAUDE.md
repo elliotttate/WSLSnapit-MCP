@@ -41,7 +41,7 @@ The tool provides three main capture modes:
 - Uses `PrintWindow` Win32 API with `PW_RENDERFULLCONTENT` flag (inspired by OBS Studio's DC capture method)
 - Captures window content without bringing it to the foreground - no `SetForegroundWindow` or z-order disruption
 - Automatic fallback to foreground capture if `PrintWindow` fails
-- Minimized windows are automatically restored before capture
+- Background mode attempts to capture minimized windows via `PrintWindow` without restoring/focusing
 - Enabled by default (`background: true`), set to `false` for legacy foreground capture
 
 ### Clipboard Capabilities

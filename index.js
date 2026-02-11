@@ -402,24 +402,28 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           $bitmap = New-Object System.Drawing.Bitmap $width, $height
           $graphics = [System.Drawing.Graphics]::FromImage($bitmap)
 
-          if ($bgCapture -and (-not $isMinimized)) {
+          if ($bgCapture) {
             # Background capture using PrintWindow API (like OBS Studio)
             # Captures window content without bringing it to the foreground
             $hdc = $graphics.GetHdc()
             $success = [Win32]::PrintWindow($hwnd, $hdc, 2)  # PW_RENDERFULLCONTENT
             $graphics.ReleaseHdc($hdc)
             if (-not $success) {
-              # Fallback to foreground capture if PrintWindow fails
-              $graphics.Dispose()
-              $bitmap.Dispose()
-              $bitmap = New-Object System.Drawing.Bitmap $width, $height
-              $graphics = [System.Drawing.Graphics]::FromImage($bitmap)
-              [Win32]::SetForegroundWindow($hwnd) | Out-Null
-              Start-Sleep -Milliseconds 200
-              $graphics.CopyFromScreen($rect.Left, $rect.Top, 0, 0, $bitmap.Size)
+              if ($isMinimized) {
+                throw "PrintWindow failed for minimized window. Cannot fallback without restoring window."
+              } else {
+                # Fallback to foreground capture if PrintWindow fails
+                $graphics.Dispose()
+                $bitmap.Dispose()
+                $bitmap = New-Object System.Drawing.Bitmap $width, $height
+                $graphics = [System.Drawing.Graphics]::FromImage($bitmap)
+                [Win32]::SetForegroundWindow($hwnd) | Out-Null
+                Start-Sleep -Milliseconds 200
+                $graphics.CopyFromScreen($rect.Left, $rect.Top, 0, 0, $bitmap.Size)
+              }
             }
           } else {
-            # Foreground capture (legacy method or window is minimized)
+            # Foreground capture (legacy mode)
             if ($isMinimized) {
               [Win32]::ShowWindow($hwnd, 9) | Out-Null  # SW_RESTORE
               Start-Sleep -Milliseconds 300
