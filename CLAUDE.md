@@ -22,7 +22,7 @@ node index.js
 ## Architecture
 
 ### Core Structure
-- **index.js**: Main MCP server implementation (v2.3.0) - contains all screenshot logic, clipboard reading, image processing, and MCP protocol handling
+- **index.js**: Main MCP server implementation (v2.4.0) - contains all screenshot logic, clipboard reading, image processing, and MCP protocol handling
 - **Runtime**: Node.js with ES modules, designed for WSL environments
 - **Communication**: stdio-based MCP server using JSON-RPC protocol
 
@@ -37,12 +37,10 @@ The tool provides three main capture modes:
 2. **Window capture**: by title (partial matching) or process name
 3. **Output modes**: direct return to Claude (optimized JPEG) or file system (PNG)
 
-### Background Window Capture
+### Window Capture
 - Uses `PrintWindow` Win32 API with `PW_RENDERFULLCONTENT` flag (inspired by OBS Studio's DC capture method)
 - Captures window content without bringing it to the foreground - no `SetForegroundWindow` or z-order disruption
-- Automatic fallback to foreground capture if `PrintWindow` fails
-- Background mode attempts to capture minimized windows via `PrintWindow` without restoring/focusing
-- Enabled by default (`background: true`), set to `false` for legacy foreground capture
+- No foreground capture fallback - all window captures use PrintWindow exclusively
 
 ### Clipboard Capabilities
 The clipboard tool provides:
@@ -82,6 +80,7 @@ The server exposes two primary tools:
 - Optimized PowerShell execution for Windows API calls
 
 ### Version History
+- v2.4.0: Exclusive PrintWindow capture - removed all foreground capture methods
 - v2.3.0: Background window capture using PrintWindow API (no need to bring window to foreground)
 - v2.1.0: Added clipboard reading functionality with text and image support
 - v2.0.0: Enhanced image compression and window detection

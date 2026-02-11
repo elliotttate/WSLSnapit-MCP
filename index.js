@@ -15,7 +15,7 @@ const execAsync = promisify(exec);
 const server = new Server(
   {
     name: 'wslsnapit-server',
-    version: '2.3.0',
+    version: '2.4.0',
   },
   {
     capabilities: {
@@ -29,7 +29,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
     tools: [
       {
         name: 'take_screenshot',
-        description: 'WSLSnapIt: Smart screenshot capture for WSL. Capture monitors, windows by title/process. Supports background window capture (no need to bring window to foreground) using PrintWindow API. Direct image return with auto-compression.',
+        description: 'WSLSnapIt: Smart screenshot capture for WSL. Capture monitors, windows by title/process. Uses PrintWindow API for window capture without bringing windows to the foreground. Direct image return with auto-compression.',
         inputSchema: {
           type: 'object',
           properties: {
@@ -73,11 +73,6 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
               minimum: 1,
               maximum: 100
             },
-            background: {
-              type: 'boolean',
-              description: 'If true (default), captures the window in the background using PrintWindow API without bringing it to the foreground. Set to false to use legacy foreground capture. Only applies to window captures (windowTitle/processName).',
-              default: true
-            }
           }
         }
       },
@@ -113,8 +108,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       processName,
       folder,
       returnDirect = true,
-      quality = 80,
-      background = true
+      quality = 80
     } = args;
     
     // Check if windowIndex was explicitly provided (not just the default)
@@ -182,7 +176,6 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       if (windowTitle || processName) {
         // Convert boolean to PowerShell boolean string
         const psWindowIndexProvided = windowIndexProvided ? '$true' : '$false';
-        const psBackground = (background !== false) ? '$true' : '$false';
         
         // Escape variables to prevent injection
         const escapedWindowTitle = (windowTitle || '').replace(/"/g, '""');
@@ -201,24 +194,12 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             public class Win32 {
               [DllImport("user32.dll")]
               public static extern bool SetProcessDPIAware();
-              
-              [DllImport("user32.dll")]
-              public static extern IntPtr FindWindow(string lpClassName, string lpWindowName);
-              
+
               [DllImport("user32.dll")]
               public static extern bool GetWindowRect(IntPtr hWnd, out RECT lpRect);
-              
-              [DllImport("user32.dll")]
-              public static extern bool SetForegroundWindow(IntPtr hWnd);
 
               [DllImport("user32.dll")]
               public static extern bool PrintWindow(IntPtr hWnd, IntPtr hdcBlt, uint nFlags);
-
-              [DllImport("user32.dll")]
-              public static extern bool IsIconic(IntPtr hWnd);
-
-              [DllImport("user32.dll")]
-              public static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
 
               public struct RECT {
                 public int Left;
@@ -396,50 +377,16 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           $width = $rect.Right - $rect.Left
           $height = $rect.Bottom - $rect.Top
           
-          $bgCapture = ${psBackground}
-          $isMinimized = [Win32]::IsIconic($hwnd)
-
           $bitmap = New-Object System.Drawing.Bitmap $width, $height
           $graphics = [System.Drawing.Graphics]::FromImage($bitmap)
 
-          if ($bgCapture) {
-            # Background capture using PrintWindow API (like OBS Studio)
-            # Captures window content without bringing it to the foreground
-            $hdc = $graphics.GetHdc()
-            $success = [Win32]::PrintWindow($hwnd, $hdc, 2)  # PW_RENDERFULLCONTENT
-            $graphics.ReleaseHdc($hdc)
-            if (-not $success) {
-              if ($isMinimized) {
-                throw "PrintWindow failed for minimized window. Cannot fallback without restoring window."
-              } else {
-                # Fallback to foreground capture if PrintWindow fails
-                $graphics.Dispose()
-                $bitmap.Dispose()
-                $bitmap = New-Object System.Drawing.Bitmap $width, $height
-                $graphics = [System.Drawing.Graphics]::FromImage($bitmap)
-                [Win32]::SetForegroundWindow($hwnd) | Out-Null
-                Start-Sleep -Milliseconds 200
-                $graphics.CopyFromScreen($rect.Left, $rect.Top, 0, 0, $bitmap.Size)
-              }
-            }
-          } else {
-            # Foreground capture (legacy mode)
-            if ($isMinimized) {
-              [Win32]::ShowWindow($hwnd, 9) | Out-Null  # SW_RESTORE
-              Start-Sleep -Milliseconds 300
-              # Recalculate rect after restore
-              [Win32]::GetWindowRect($hwnd, [ref]$rect) | Out-Null
-              $width = $rect.Right - $rect.Left
-              $height = $rect.Bottom - $rect.Top
-              $graphics.Dispose()
-              $bitmap.Dispose()
-              $bitmap = New-Object System.Drawing.Bitmap $width, $height
-              $graphics = [System.Drawing.Graphics]::FromImage($bitmap)
-            } else {
-              [Win32]::SetForegroundWindow($hwnd) | Out-Null
-              Start-Sleep -Milliseconds 200
-            }
-            $graphics.CopyFromScreen($rect.Left, $rect.Top, 0, 0, $bitmap.Size)
+          # Background capture using PrintWindow API (like OBS Studio)
+          # Captures window content without bringing it to the foreground
+          $hdc = $graphics.GetHdc()
+          $success = [Win32]::PrintWindow($hwnd, $hdc, 2)  # PW_RENDERFULLCONTENT
+          $graphics.ReleaseHdc($hdc)
+          if (-not $success) {
+            throw "PrintWindow failed for the target window. The window may not support background capture."
           }
           
           ${captureCode}
