@@ -201,11 +201,37 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
               [DllImport("user32.dll")]
               public static extern bool PrintWindow(IntPtr hWnd, IntPtr hdcBlt, uint nFlags);
 
+              [DllImport("user32.dll")]
+              public static extern bool IsIconic(IntPtr hWnd);
+
+              [DllImport("user32.dll")]
+              public static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
+
+              [DllImport("user32.dll")]
+              public static extern bool GetWindowPlacement(IntPtr hWnd, ref WINDOWPLACEMENT lpwndpl);
+
+              public const int SW_SHOWNOACTIVATE = 4;
+              public const int SW_MINIMIZE = 6;
+
               public struct RECT {
                 public int Left;
                 public int Top;
                 public int Right;
                 public int Bottom;
+              }
+
+              public struct POINT {
+                public int X;
+                public int Y;
+              }
+
+              public struct WINDOWPLACEMENT {
+                public int length;
+                public int flags;
+                public int showCmd;
+                public POINT ptMinPosition;
+                public POINT ptMaxPosition;
+                public RECT rcNormalPosition;
               }
             }
 "@
@@ -370,13 +396,34 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         
         const psScriptEnd = `
           
-          # Get window rectangle
+          # If the window is minimized, GetWindowRect returns off-screen coords (~-32000,-32000)
+          # and PrintWindow has nothing useful to capture. Temporarily restore the window WITHOUT
+          # activating it (SW_SHOWNOACTIVATE = 4) so it doesn't steal focus, capture, then put
+          # it back to minimized state.
+          $wasMinimized = [Win32]::IsIconic($hwnd)
+          if ($wasMinimized) {
+            [Win32]::ShowWindow($hwnd, [Win32]::SW_SHOWNOACTIVATE) | Out-Null
+            # Give the WM a moment to lay the window back out before we read its rect.
+            Start-Sleep -Milliseconds 250
+          }
+
+          # Get window rectangle (now reflects the on-screen geometry).
           $rect = New-Object Win32+RECT
           [Win32]::GetWindowRect($hwnd, [ref]$rect) | Out-Null
-          
+
           $width = $rect.Right - $rect.Left
           $height = $rect.Bottom - $rect.Top
-          
+
+          # Fallback: if width/height are still degenerate (some apps don't honor SW_SHOWNOACTIVATE
+          # quickly enough), use the placement's restored rect.
+          if ($width -le 0 -or $height -le 0) {
+            $placement = New-Object Win32+WINDOWPLACEMENT
+            $placement.length = [System.Runtime.InteropServices.Marshal]::SizeOf($placement)
+            [Win32]::GetWindowPlacement($hwnd, [ref]$placement) | Out-Null
+            $width = $placement.rcNormalPosition.Right - $placement.rcNormalPosition.Left
+            $height = $placement.rcNormalPosition.Bottom - $placement.rcNormalPosition.Top
+          }
+
           $bitmap = New-Object System.Drawing.Bitmap $width, $height
           $graphics = [System.Drawing.Graphics]::FromImage($bitmap)
 
@@ -385,6 +432,12 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           $hdc = $graphics.GetHdc()
           $success = [Win32]::PrintWindow($hwnd, $hdc, 2)  # PW_RENDERFULLCONTENT
           $graphics.ReleaseHdc($hdc)
+
+          # Restore minimized state if we changed it.
+          if ($wasMinimized) {
+            [Win32]::ShowWindow($hwnd, [Win32]::SW_MINIMIZE) | Out-Null
+          }
+
           if (-not $success) {
             throw "PrintWindow failed for the target window. The window may not support background capture."
           }
