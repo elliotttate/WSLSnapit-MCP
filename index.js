@@ -12,6 +12,33 @@ import sharp from 'sharp';
 
 const execAsync = promisify(exec);
 
+const DROPBOX_SCREENSHOT_DIR = process.env.WSLSNAPIT_DROPBOX_DIR || 'C:\\Users\\ellio\\Dropbox\\Screenshots';
+
+async function saveToDropbox(pngBuffer, suggestedName) {
+  try {
+    await fs.mkdir(DROPBOX_SCREENSHOT_DIR, { recursive: true });
+    const ts = new Date().toISOString().replace(/[:.]/g, '-').replace('T', '_').slice(0, 19);
+    const base = (suggestedName || 'screenshot').replace(/\.(png|jpe?g)$/i, '');
+    const target = path.join(DROPBOX_SCREENSHOT_DIR, `${base}_${ts}.png`);
+    await fs.writeFile(target, pngBuffer);
+    console.error(`[WSLSnapIt] Copied to Dropbox: ${target}`);
+    return target;
+  } catch (err) {
+    console.error(`[WSLSnapIt] Dropbox copy failed: ${err.message}`);
+    return null;
+  }
+}
+
+const SERVER_INSTRUCTIONS = `WSLSnapIt: Windows screenshot and clipboard tool.
+
+Despite the "WSL" in the name, this captures the actual Windows desktop. It works whether you're calling from WSL or native Windows.
+
+Use this server when you need to SEE what is on the user's screen, capture a UI bug, look at an app window, or read what the user just copied.
+
+Tools:
+- take_screenshot — capture the full desktop ("all"), a specific monitor by number or "primary", a window by title (partial match), or a window by process name. Window capture uses the PrintWindow API, so it does NOT bring windows to the foreground or steal focus — safe to use while the user is working elsewhere. Returns a JPEG inline by default (auto-resized/compressed to fit), or saves to disk when returnDirect=false. A full-quality PNG copy is also dropped into the user's Dropbox/Screenshots folder for archival.
+- read_clipboard — read the current Windows clipboard content. Auto-detects text vs. image, or force a format.`;
+
 const server = new Server(
   {
     name: 'wslsnapit-server',
@@ -24,12 +51,22 @@ const server = new Server(
   }
 );
 
+// SDK 0.6.1 doesn't expose `instructions` on the Server constructor, but
+// InitializeResultSchema uses Zod .passthrough(), so we can inject it by
+// overriding the initialize handler on the instance.
+const _origOnInitialize = server._oninitialize.bind(server);
+server._oninitialize = async (request) => {
+  const result = await _origOnInitialize(request);
+  result.instructions = SERVER_INSTRUCTIONS;
+  return result;
+};
+
 server.setRequestHandler(ListToolsRequestSchema, async () => {
   return {
     tools: [
       {
         name: 'take_screenshot',
-        description: 'WSLSnapIt: Smart screenshot capture for WSL. Capture monitors, windows by title/process. Uses PrintWindow API for window capture without bringing windows to the foreground. Direct image return with auto-compression.',
+        description: 'Take a screenshot of the Windows desktop, a specific monitor, or a specific window. Use this whenever you need to SEE what is on the user\'s screen — debug a UI, look at an app window, capture a bug, or check what the user is referring to. Targets: full desktop ("all"), a specific monitor by number or "primary", a window by title (partial match supported), or a window by process name (e.g. "chrome", "notepad"). Window capture uses the Windows PrintWindow API, so it does NOT bring the target window to the foreground or steal focus. Returns the image inline as a JPEG (auto-resized/compressed to fit) by default, or saves a PNG to disk when returnDirect=false.',
         inputSchema: {
           type: 'object',
           properties: {
@@ -78,7 +115,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       },
       {
         name: 'read_clipboard',
-        description: 'Read the current Windows clipboard content (text or image)',
+        description: 'Read the current Windows clipboard content. Returns whatever the user most recently copied — text (Ctrl+C from anywhere) or an image (screenshot, copied picture, etc.). Auto-detects format (prefers image when both are present), or force a specific format with the format parameter. Part of the WSLSnapIt screenshot/clipboard server.',
         inputSchema: {
           type: 'object',
           properties: {
@@ -641,7 +678,10 @@ Example: \`windowIndex: 2\` to capture the second window`;
         
         // Process the PNG with sharp
         const pngBuffer = Buffer.from(base64Data, 'base64');
-        
+
+        // Best-effort copy to Dropbox (full-quality PNG)
+        await saveToDropbox(pngBuffer, filename);
+
         // Dynamic compression with sharp
         const maxSizeBytes = 950 * 1024; // 950KB target
         const metadata = await sharp(pngBuffer).metadata();
@@ -729,7 +769,15 @@ Example: \`windowIndex: 2\` to capture the second window`;
       if (!returnDirect) {
         const outputPath = path.join(screenshotsDir, filename);
         await fs.access(outputPath);
-        
+
+        // Best-effort copy to Dropbox — PowerShell writes to windowsPath
+        try {
+          const savedBuffer = await fs.readFile(windowsPath);
+          await saveToDropbox(savedBuffer, filename);
+        } catch (err) {
+          console.error(`[WSLSnapIt] Dropbox copy failed: ${err.message}`);
+        }
+
         // Generate appropriate success message based on folder used
         let successPath;
         if (customFolder) {
